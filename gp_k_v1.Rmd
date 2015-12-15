@@ -1,0 +1,194 @@
+---
+title: "Pilot K means for general practices - version 2"
+author: "Julian Flowers"
+date: "7 December 2015"
+output: pdf_document
+---
+
+There are 8000 general practices in England and data for each practice is increasingly available in the public domain. There are however few tools which enable analysts and practices to compare practices with similar peers to help evaluate their performance. A previous tool developed by APHO seemingly considerably misclassified practices, and it was agreed by the National Practice Benchmarking and Indicators group that the issue of finding peer groups should be revisited.
+
+This short note is a pilot evaluation of a simple method based on k-means analysis of an extract of the national general practice profiles. The NGPP contain about 250 publicly available indicators of the health, utilisation, demography and characteristics of general practice populations. For this analysis and to keep things simple we have chosen a few demographic variables - total population, age break down and deprivation as a proof of concept before trying the larger list of classification variables for which there is general consensus should be included in such a peer grouping exercise.
+
+K-means analysis is a relatively simple and widely used for what is known as unsupervised machine learning. It clusters data together on the basis of similarity among all predictor variables into a pre-specified number of groups. The idea is that practices are clustered into groups which are more similar to each other on the variables of interest, and farther apart from other practice clusters.
+
+## Method
+
+The data for this analysis was extracted from the spreadsheets downloaded from the [NGPP website](http://fingertips.phe.org.uk/profile/general-practice) and included the following variables for each practice:
+
+- Practice code
+- CCG
+- Total registered population (2014)
+- IMD 2015 practice score (% of population with some form of deprivation)
+- % population <5
+- % population 5-14
+- % population 65+
+- % population 75+
+- % population 85+
+- & population under 18
+- ethnic population
+
+The analysis has been conducted in R and this report written in R Markdown using the R Studio package to allow us to embed relevant code which can then be shared and easily modified if we wish to change the variables or analysis.
+
+It updates the previous analysis to latest data for populations and IMD scores and adds ethnicity (% population white)
+
+```{r, cache = TRUE, echo = FALSE, message=FALSE}
+library(knitr)
+library(dplyr)
+setwd("~/Documents/R_projects/K_GP/update/update_gp")
+kgp <- read.csv('P_comb.csv', stringsAsFactors = FALSE)
+colnames(kgp) <- c("practice", "ccg", "%0-4", "%5-14", "%<18", "%65+", "%75+", "%85+", "imd","%work", "pop","%eth")
+kgp <- select(kgp, -starts_with("%work"))
+```
+
+The dataset only contains `r nrow(kgp)` practices because it excludes small practices and those with discrepancies between QOF reported practice size and the registered population.
+
+### The dataset
+
+We can summarise the dataset and see that there are 13 missing % in work values  - we won't use this variable. 
+
+
+```{r, echo=FALSE, message=FALSE}
+require(dplyr)
+require(knitr)
+kable(summary(kgp[,-c(1:2, 5,6,8)]))
+
+```
+
+
+Exploring the relationship between the variables suggests that deprivation has a complex relationship with age structure. The under 18 variable is strongly correlated with %0-4 and %5-14 so to simplify the analysis we will exclude this. Similarly we'll use 75+ and drop 65+ and 85+.
+
+
+```{r, echo = FALSE}
+source('~/Documents/R_projects/K_GP/panelcor.R') ## adds correlation coefficients to plot
+pairs(kgp[,-(1:2)], upper.panel = panel.cor, lower.panel = panel.smooth)
+```
+
+
+There also seems to be an outlying practice with high proportions of older people. This practice is 
+`r kgp[which.max(kgp$'85+'),1]`. Looking at the characteristics of this practice shows it is small with an exclusively older population, suggesting it is probably a nursing home practice. We'll keep it in for the analysis.
+
+```{r, echo=FALSE}
+kgp[kgp$practice == "Y02625",]
+```
+
+
+
+## Cluster analysis
+
+A simple hierarchical cluster analysis produces the dendrogram below. Each branch is a general practice. The dendrogram partitions the data according to similarity - the further down the tree the more similar practices are. It is hard to see all the detail (the chart shows all 7750 practices) but it picks out the outlier (single branch at the top left of the chart) and suggests there are number of practice groupings. We can use this as a basis for assigning clusters, depending on how fine grained we want them to be. Note that we have scaled the data (z-scores) because clustering is sensitive to absolute values.
+
+```{r, echo=FALSE}
+kgp <- select(kgp,- c(`%<18`,`%65+`, `%85+`))
+gpd <- dist(scale(kgp[,-(1:2)]))
+hc <- hclust(gpd)
+plot(hc, cex = 0.3)
+```
+
+## K means analysis
+
+For this part of the analysis, we'll exclude practices with no IMD scores. The k in k means to be specified and we'll arbitrarily start with 10. For context the average of each variable is: 
+
+```{r, message=FALSE}
+require(knitr)
+round(apply(kgp[,-(1:2)], 2, function(x) mean(x, na.rm = TRUE)),2)
+```
+
+### Running the k means analysis
+
+With 10 clusters
+
+```{r}
+set.seed(1) ## this is needed because there is an element of random sampling
+k <- kmeans(scale(kgp[,-(1:2)]), 10)
+```
+
+### Summary of results
+```{r, message= FALSE}
+require(knitr)
+k$size
+agg <- round(aggregate(kgp[,-(1:2)], by = list(cluster=k$cluster), mean),2) ## summary of the results
+    agg$cluster <-as.factor(agg$cluster)
+      kable(agg[,-8])
+```
+
+#### Parallel coordinate plot
+```{r, message=FALSE}
+require(ggplot2)
+require(GGally)
+ggparcoord(agg, columns = c(2:7), scale = 'std',scaleSummary = mean, showPoints = TRUE, groupColumn = 1) + 
+     ggtitle("Mean values for each cluster")+ 
+     ylab("z-scores") ## parallel coorindates plot of results of mean values for each cluster
+```
+
+We can begin to see the nature of the clusters this method identifies. For example, the second smallest is cluster 6 with 283 practices. These are on average characterised by average practice size, slightly higher levels of deprivation, and a "middle aged" age distribution (the proportion of the population either young or old is much lower than average). The smallest, cluster 9 with 190 practices, clusters the larger practices with average levels of the other variables. Cluster 5 is the largest group - these are smaller practices with a "typical" age distribution and so on. Cluster 1 and 2 are larger practices  - cluster 2 tends to be older and more deprived than cluster 1.
+
+It is possible to to create qualitative labels for each group, and enrich the clustering with additional variables - ethnicity and rurality are of particular interest.
+
+We can add the clusters back to the original data to identify which practice is in which cluster and do some more sense checking.
+
+```{r, echo = FALSE, warning=FALSE, message = FALSE}
+kgp$cluster <- k$cluster
+kgp$imd1 <- cut(kgp$imd, 10) ## deciles of deprivation score
+g1<- ggplot(kgp, aes(pop, cluster, col= as.factor(cluster), alpha = 0.5)) + geom_point() + facet_wrap(~imd1) + theme_bw(base_size = 6)
+g1
+write.csv(kgp, file = "gp_k.csv")
+```
+
+We can look at the distribution of practices within clusters by CCG. For example, most practices in Barking and Dagenham are in cluster 4, and most in Bradford are in cluster 3.
+
+```{r}
+require(knitr)
+t<- (with(kgp,table(ccg, cluster)))
+
+kable(t)
+```
+
+
+With 15 clusters
+
+```{r}
+kgp<-kgp[,-c(9:10)]
+set.seed(2) ## this is needed because there is an element of random sampling
+k <- kmeans(scale(kgp[,-(1:2)]), 15)
+```
+
+### Summary of results
+```{r, message= FALSE}
+require(knitr)
+k$size
+agg <- round(aggregate(kgp[,-(1:2)], by = list(cluster=k$cluster), mean),2) ## summary of the results
+    agg$cluster <-as.factor(agg$cluster)
+      kable(agg[,-8])
+```
+
+#### Parallel coordinate plot
+```{r, message=FALSE}
+require(ggplot2)
+require(GGally)
+ggparcoord(agg, columns = c(2:7), scale = 'std',scaleSummary = mean, showPoints = TRUE, groupColumn = 1) + 
+     ggtitle("Mean values for each cluster")+ 
+     ylab("z-scores") ## parallel coorindates plot of results of mean values for each cluster
+```
+
+We can begin to see the nature of the clusters this method identifies. For example, the second smallest is cluster 6 with 283 practices. These are on average characterised by average practice size, slightly higher levels of deprivation, and a "middle aged" age distribution (the proportion of the population either young or old is much lower than average). The smallest, cluster 9 with 190 practices, clusters the larger practices with average levels of the other variables. Cluster 5 is the largest group - these are smaller practices with a "typical" age distribution and so on. Cluster 1 and 2 are larger practices  - cluster 2 tends to be older and more deprived than cluster 1.
+
+It is possible to to create qualitative labels for each group, and enrich the clustering with additional variables - ethnicity and rurality are of particular interest.
+
+We can add the clusters back to the original data to identify which practice is in which cluster and do some more sense checking.
+
+```{r, echo = FALSE, warning=FALSE, message = FALSE}
+kgp$cluster <- k$cluster
+kgp$imd1 <- cut(kgp$imd, 10) ## deciles of deprivation score
+g1<- ggplot(kgp, aes(pop, cluster, col= as.factor(cluster), alpha = 0.5)) + geom_point() + facet_wrap(~imd1) + theme_bw(base_size = 6)
+g1
+write.csv(kgp, file = "gp_k1.csv")
+```
+
+We can look at the distribution of practices within clusters by CCG. For example, most practices in Barking and Dagenham are in cluster 4, and most in Bradford are in cluster 3.
+
+```{r}
+require(knitr)
+t<- (with(kgp,table(ccg, cluster)))
+
+kable(t)
+```
